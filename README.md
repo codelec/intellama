@@ -106,6 +106,8 @@ Flags:
 | `--host` | `0.0.0.0` | Bind address |
 | `--port` | `11434` | Bind port |
 | `--max-new-tokens` | `512` | Default generation cap when a client doesn't set `num_predict` |
+| `--max-prompt-len` | *(unset)* | NPU only, requires `--device NPU` exactly: max input-prompt tokens the static pipeline compiles for (openvino_genai default: 1024) |
+| `--min-response-len` | *(unset)* | NPU only, requires `--device NPU` exactly: min response tokens the static pipeline reserves (openvino_genai default: 128) |
 
 If real Ollama is already installed and running as a service, it likely owns
 port `11434` already — either stop it (`sudo systemctl stop ollama`) or run
@@ -116,6 +118,21 @@ by OpenVINO GenAI) and only sustains a handful of concurrent requests before
 they start queuing at the driver level — fine for single-user use, not for
 high-concurrency serving.
 
+NPU prompt-length handling: the NPU backend hard-errors if a prompt exceeds
+its compiled `MAX_PROMPT_LEN` (default 1024 tokens) — easy to hit with
+clients that inject large system prompts/tool schemas or long chat histories
+(e.g. VS Code Copilot Chat). This server proactively counts tokens before
+generating and truncates oversized requests instead of letting them fail:
+for `/api/chat`, it drops the oldest turns first, then shrinks the most
+recent message's content, and as a last resort shrinks the system message
+too (large tool schemas can dominate on their own); for `/api/generate`, it
+trims the raw prompt down to its last N tokens. A `[TRUNCATED]` line is
+logged whenever this happens. Use `--max-prompt-len`/`--min-response-len` to
+raise the ceiling instead of relying on truncation, but note that very long
+NPU prompts can degrade output quality even when they fit within the limit
+(see [openvino.genai#3255](https://github.com/openvinotoolkit/openvino.genai/issues/3255)),
+so this isn't a substitute for keeping conversations reasonably short.
+
 ## API endpoints implemented
 
 | Method | Path | Notes |
@@ -124,11 +141,13 @@ high-concurrency serving.
 | GET | `/api/version` | Returns a static version string |
 | GET | `/api/tags` | Lists the single served model |
 | POST | `/api/show` | Returns basic model metadata |
+| GET | `/api/ps` | Lists the single served model as "running", since it's loaded for the server's whole lifetime. `size_vram` reports the full model size on GPU/NPU and `0` on CPU; `expires_at` reports Ollama's "never unloads" sentinel, since this server has no idle-unload behavior |
 | POST | `/api/generate` | Prompt completion; supports `stream: true/false` |
 | POST | `/api/chat` | Chat completion; applies the model's chat template automatically; supports `stream: true/false` |
+| GET | `/api/experimental/model-recommendations` | Mirrors real Ollama's own (undocumented) endpoint of the same name, which the official `ollama-vscode` extension (VS Code Copilot Chat's "Ollama" model provider) and the Ollama desktop app query to highlight recommended models. Returns the currently served model first (guaranteed to work), followed by a small curated catalog of other known-good OpenVINO models for informational purposes only - this server can't `/api/pull` them for you |
 
 Any other Ollama endpoint (`/api/pull`, `/api/push`, `/api/create`,
-`/api/copy`, `/api/delete`, `/api/embed`/`/api/embeddings`, `/api/ps`, ...) is
+`/api/copy`, `/api/delete`, `/api/embed`/`/api/embeddings`, ...) is
 **not implemented**. Calling one returns HTTP 404 with a JSON error body, and
 the server prints a line like:
 
@@ -167,6 +186,26 @@ curl -N -H "Content-Type: application/json" http://localhost:11434/api/chat -d '
 `repeat_penalty`, `stop`. Unrecognized options are silently ignored rather
 than erroring out.
 
+### Reasoning ("thinking") output
+
+Reasoning models (e.g. Qwen3) emit a `<think>...</think>` block ahead of
+their actual answer. This server parses that block out of the raw output
+and returns it separately, matching real Ollama's
+[thinking](https://docs.ollama.com/capabilities/thinking) API: `message.thinking`
+for `/api/chat`, `thinking` for `/api/generate`, alongside `message.content`/
+`response`, which only ever contains the final answer. This works the same
+in both streaming and non-streaming mode. Clients that already understand
+Ollama's `thinking` field (e.g. VS Code's Ollama provider, `ollama-python`)
+will render the reasoning trace separately (typically collapsed) instead of
+showing raw `<think>` tags inline as garbled text.
+
+Pass `"think": false` in a request to drop the reasoning trace from the
+response entirely (it's still generated internally - there's no faster
+"non-thinking" mode to switch to - just not returned). Any other value
+(omitted, `true`, or an effort-level string like `"low"`) keeps it separated
+into the `thinking` field, which is this server's default behavior since the
+underlying model always reasons anyway.
+
 ### Using it with Ollama SDKs / Open WebUI
 
 Anything that lets you point at a custom Ollama host works. For example,
@@ -195,8 +234,15 @@ This is intentionally a minimal server, not a full Ollama replacement:
 - **No model management** (`/api/pull`, `/api/delete`, `/api/create`, etc.) —
   download and point `--model-dir` at models manually instead.
 - **No embeddings API.**
-- Reasoning models (e.g. Qwen3) include their raw `<think>...</think>` block
-  in the response; this server doesn't strip or separate it.
+- Reasoning models (e.g. Qwen3) always think - there's no way to make the
+  underlying model skip its `<think>...</think>` block (e.g. via effort
+  levels like GPT-OSS's `low`/`medium`/`high`, or Qwen3's own `/no_think`
+  system-prompt directive), so `think: false` only hides the trace from the
+  response rather than skipping the extra generation cost.
+- On NPU, oversized prompts/chat histories are truncated to fit the static
+  `MAX_PROMPT_LEN` (see [NPU prompt-length handling](#running-the-server))
+  rather than rejected outright, so very long conversations lose their
+  oldest turns silently (a `[TRUNCATED]` line is logged server-side).
 
 ## Troubleshooting
 
