@@ -50,6 +50,21 @@ def _watch_for_disconnect(request: Request, stream: TokenStream) -> None:
     task.add_done_callback(_disconnect_watchers.discard)
 
 
+def _debug_log(label: str, text: str, limit: int = 2000) -> None:
+    """Opt-in (--debug) logging of raw prompts/messages and raw model output.
+
+    Useful for diagnosing malformed or unexpected responses - e.g. a
+    client's hidden session/title-generation requests, or a chat template
+    mismatch causing the model to echo structural markup instead of
+    answering - since none of that is otherwise visible outside the chat
+    client's own (often opaque) UI.
+    """
+    if not STATE.get("debug"):
+        return
+    truncated = text if len(text) <= limit else text[:limit] + f"... [{len(text) - limit} more chars]"
+    print(f"[DEBUG] {label}:\n{truncated}\n", flush=True)
+
+
 @router.post("/api/generate")
 async def api_generate(req: GenerateRequest, request: Request):
     model_name = req.model or STATE["served_name"]
@@ -66,12 +81,14 @@ async def api_generate(req: GenerateRequest, request: Request):
     except Exception as exc:  # noqa: BLE001
         return preflight_error_response(model_name, "response", str(exc), req.stream)
 
+    _debug_log("api/generate raw prompt sent to model", prompt)
     t0 = time.perf_counter()
     stream = run_generation(prompt, req.options)
     _watch_for_disconnect(request, stream)
 
     if not req.stream:
         thinking_text, content_text = await run_in_threadpool(collect_split, stream)
+        _debug_log("api/generate raw model output", f"thinking={thinking_text!r}\ncontent={content_text!r}")
         elapsed_ns = int((time.perf_counter() - t0) * 1e9)
         body = {
             "model": model_name,
@@ -89,7 +106,9 @@ async def api_generate(req: GenerateRequest, request: Request):
         return body
 
     def event_gen():
+        debug_parts = []
         for kind, text in split_thinking_stream(stream):
+            debug_parts.append((kind, text))
             if kind == "thinking" and not include_thinking:
                 continue
             chunk: Dict[str, Any] = {"model": model_name, "created_at": now_iso(), "done": False}
@@ -99,6 +118,9 @@ async def api_generate(req: GenerateRequest, request: Request):
             else:
                 chunk["response"] = text
             yield json.dumps(chunk) + "\n"
+        thinking_text = "".join(t for k, t in debug_parts if k == "thinking")
+        content_text = "".join(t for k, t in debug_parts if k == "content")
+        _debug_log("api/generate raw model output (streamed)", f"thinking={thinking_text!r}\ncontent={content_text!r}")
         elapsed_ns = int((time.perf_counter() - t0) * 1e9)
         final = {
             "model": model_name,
@@ -126,6 +148,8 @@ async def api_chat(req: ChatRequest, request: Request):
     except Exception as exc:  # noqa: BLE001
         return preflight_error_response(model_name, "message", str(exc), req.stream)
 
+    _debug_log("api/chat raw incoming messages", json.dumps(messages, ensure_ascii=False, indent=2))
+    _debug_log("api/chat rendered prompt sent to model", prompt)
     t0 = time.perf_counter()
     # apply_chat_template=False: build_chat_prompt() already rendered the
     # full template above, so the pipeline must not apply it a second time.
@@ -134,6 +158,7 @@ async def api_chat(req: ChatRequest, request: Request):
 
     if not req.stream:
         thinking_text, content_text = await run_in_threadpool(collect_split, stream)
+        _debug_log("api/chat raw model output", f"thinking={thinking_text!r}\ncontent={content_text!r}")
         elapsed_ns = int((time.perf_counter() - t0) * 1e9)
         message: Dict[str, Any] = {"role": "assistant", "content": content_text}
         if include_thinking and thinking_text:
@@ -151,7 +176,9 @@ async def api_chat(req: ChatRequest, request: Request):
         return body
 
     def event_gen():
+        debug_parts = []
         for kind, text in split_thinking_stream(stream):
+            debug_parts.append((kind, text))
             if kind == "thinking" and not include_thinking:
                 continue
             message: Dict[str, Any] = {"role": "assistant"}
@@ -163,6 +190,9 @@ async def api_chat(req: ChatRequest, request: Request):
             yield json.dumps(
                 {"model": model_name, "created_at": now_iso(), "message": message, "done": False}
             ) + "\n"
+        thinking_text = "".join(t for k, t in debug_parts if k == "thinking")
+        content_text = "".join(t for k, t in debug_parts if k == "content")
+        _debug_log("api/chat raw model output (streamed)", f"thinking={thinking_text!r}\ncontent={content_text!r}")
         elapsed_ns = int((time.perf_counter() - t0) * 1e9)
         final = {
             "model": model_name,

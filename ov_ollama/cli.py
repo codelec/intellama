@@ -37,6 +37,13 @@ def build_arg_parser() -> argparse.ArgumentParser:
         help="NPU only (requires --device NPU exactly): min response tokens the static pipeline reserves "
              "(openvino_genai default: 128).",
     )
+    parser.add_argument(
+        "--debug",
+        action="store_true",
+        help="Log the raw prompt/messages sent to the model and its raw (pre-<think>-split) output for "
+             "every /api/generate and /api/chat request. Useful for diagnosing malformed or unexpected "
+             "responses (e.g. a client's hidden session/title-generation requests).",
+    )
     return parser
 
 
@@ -70,6 +77,7 @@ def load_model(args: argparse.Namespace) -> None:
     STATE["is_npu"] = is_npu
     STATE["max_prompt_len"] = args.max_prompt_len or 1024
     STATE["min_response_len"] = args.min_response_len or 128
+    STATE["debug"] = args.debug
 
 
 def main() -> None:

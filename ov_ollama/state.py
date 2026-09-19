@@ -19,4 +19,5 @@ STATE: Dict[str, Any] = {
     "is_npu": False,
     "max_prompt_len": 1024,  # openvino_genai's NPU default; overridable via --max-prompt-len
     "min_response_len": 128,  # openvino_genai's NPU default; overridable via --min-response-len
+    "debug": False,  # overridable via --debug; logs raw prompts/messages and raw model output
 }
