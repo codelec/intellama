@@ -1,6 +1,6 @@
 # ov-ollama
 
-A minimal, single-file HTTP server that speaks a compatible subset of
+A minimal HTTP server that speaks a compatible subset of
 [Ollama](https://ollama.com)'s REST API, backed by
 [OpenVINO GenAI](https://github.com/openvinotoolkit/openvino.genai) instead of
 `llama.cpp`. It lets you run OpenVINO IR models pulled straight from Hugging
@@ -108,6 +108,24 @@ Flags:
 | `--max-new-tokens` | `512` | Default generation cap when a client doesn't set `num_predict` |
 | `--max-prompt-len` | *(unset)* | NPU only, requires `--device NPU` exactly: max input-prompt tokens the static pipeline compiles for (openvino_genai default: 1024) |
 | `--min-response-len` | *(unset)* | NPU only, requires `--device NPU` exactly: min response tokens the static pipeline reserves (openvino_genai default: 128) |
+
+`server.py` is just the entry point; the implementation lives in the
+`ov_ollama/` package next to it:
+
+| File | Contents |
+|---|---|
+| `ov_ollama/state.py` | Process-wide state for the single loaded model |
+| `ov_ollama/utils.py` | Timestamp and directory-size helpers |
+| `ov_ollama/schemas.py` | Request bodies for `/api/generate` and `/api/chat` |
+| `ov_ollama/catalog.py` | Curated list of known-good OpenVINO models |
+| `ov_ollama/prompts.py` | Prompt assembly and NPU prompt-length truncation |
+| `ov_ollama/generation.py` | `GenerationConfig` mapping and token streaming |
+| `ov_ollama/thinking.py` | `<think>...</think>` separation |
+| `ov_ollama/responses.py` | Ollama-shaped response helpers |
+| `ov_ollama/api_meta.py` | Metadata/discovery routes |
+| `ov_ollama/api_inference.py` | `/api/generate` and `/api/chat` routes |
+| `ov_ollama/app.py` | FastAPI app assembly (routers + catch-all fallback) |
+| `ov_ollama/cli.py` | Flag parsing, model loading, uvicorn startup |
 
 If real Ollama is already installed and running as a service, it likely owns
 port `11434` already — either stop it (`sudo systemctl stop ollama`) or run
@@ -263,6 +281,31 @@ This is intentionally a minimal server, not a full Ollama replacement:
 - **Requests hang / never return a response**: check the server's console
   output — the first request after startup includes model warmup time, and
   NPU/GPU compilation on first load can take longer than CPU.
+
+## Running tests
+The test suite exercises every route against fake tokenizer/pipeline test
+doubles (see `tests/fakes.py`), so it runs without real model weights or
+CPU/GPU/NPU hardware:
+```bash
+./venv/bin/pip install pytest
+./venv/bin/pytest -q
+```
+Coverage includes:
+- Metadata/discovery routes (`/api/tags`, `/api/show`, `/api/ps`,
+  `/api/experimental/model-recommendations`) and the unimplemented-endpoint
+  fallback.
+- `/api/generate` and `/api/chat`, streaming and non-streaming, including
+  `<think>` separation and error propagation.
+- Ultra-long-prompt NPU truncation (`tests/test_npu_truncation.py`):
+  multi-thousand-token prompts and chat histories that exercise every
+  truncation step in `ov_ollama/prompts.py` (dropping oldest turns,
+  shrinking the latest message, shrinking the system prompt), plus control
+  cases proving CPU/GPU devices pass ultra-long input through unmodified.
+- An end-to-end simulation of the VS Code Copilot Chat "Ollama" provider's
+  request sequence (`tests/test_vscode_extension_flow.py`): startup
+  discovery calls, a chat turn carrying a large injected tool-schema system
+  prompt, and a growing multi-turn conversation that triggers NPU
+  truncation mid-flow, validating the NDJSON streaming contract throughout.
 
 ## License
 
