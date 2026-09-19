@@ -9,6 +9,7 @@ whatever encode() returns).
 """
 
 import re
+import time
 import types
 from typing import Any, Dict, List, Optional
 
@@ -70,9 +71,19 @@ class FakePipe:
         "<think>Let me think about this step by step.</think>\nHere is the final answer."
     )
 
-    def __init__(self, response_text: Optional[str] = None, raise_error: Optional[str] = None):
+    def __init__(
+        self,
+        response_text: Optional[str] = None,
+        raise_error: Optional[str] = None,
+        delay: float = 0.0,
+    ):
         self.response_text = response_text if response_text is not None else self.DEFAULT_RESPONSE
         self.raise_error = raise_error
+        # Optional per-chunk pacing, opt-in only: lets cancellation tests
+        # interleave a cancel() call mid-generation instead of the whole
+        # (otherwise instant) fake response completing before they get a
+        # chance to act.
+        self.delay = delay
         self.last_prompt: Optional[str] = None
         self.last_config: Any = None
         self.calls: List[Dict[str, Any]] = []
@@ -103,6 +114,8 @@ class FakePipe:
         # subword streaming concatenates back into the full text.
         chunks = re.findall(r"\S+\s*", self.response_text)
         for chunk in chunks:
+            if self.delay:
+                time.sleep(self.delay)
             status = callback(chunk)
             if status != ov_genai.StreamingStatus.RUNNING:
                 break

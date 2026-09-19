@@ -48,8 +48,12 @@ class TokenStream:
         self.q: "queue.Queue[Optional[str]]" = queue.Queue()
         self.error: Optional[str] = None
         self.token_count = 0
+        self.cancelled = threading.Event()
+        self.finished = threading.Event()
 
     def _callback(self, subword: str):
+        if self.cancelled.is_set():
+            return ov_genai.StreamingStatus.CANCEL
         self.q.put(subword)
         self.token_count += 1
         return ov_genai.StreamingStatus.RUNNING
@@ -61,13 +65,23 @@ class TokenStream:
             try:
                 STATE["pipe"].generate(prompt, config, self._callback)
             except Exception as exc:  # noqa: BLE001
-                self.error = str(exc)
+                if not self.cancelled.is_set():
+                    self.error = str(exc)
             finally:
                 self.q.put(None)  # sentinel: generation finished
+                self.finished.set()
 
     def start(self, prompt: str, config):
         threading.Thread(target=self._run, args=(prompt, config), daemon=True).start()
         return self
+
+    def cancel(self):
+        """Signals the background generation to stop at the next streamed
+        token (checked in _callback). Used when the HTTP client that
+        requested this generation has disconnected, so an abandoned request
+        (e.g. a client-side retry) doesn't keep holding STATE["gen_lock"]
+        for a response nobody will read."""
+        self.cancelled.set()
 
     def __iter__(self):
         while True:
